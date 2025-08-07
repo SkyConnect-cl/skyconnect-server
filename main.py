@@ -56,7 +56,7 @@ async def recibir_datos_ttn(request: Request):
         rssi = rx_metadata[0].get("rssi") if rx_metadata else None
 
         if len(macs) > 0:
-            response = consulta_google_geolocation(macs)
+            response = await consulta_google_geolocation(macs)
             latitude = response["location"]["lat"]
             longitude = response["location"]["lon"]
         datos = supabase.table("device").select("empresas(geocercas)").eq("device_id", device_id).single().execute()
