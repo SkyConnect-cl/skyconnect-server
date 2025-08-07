@@ -1,4 +1,6 @@
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, HTTPException
+from pydantic import BaseModel
+from typing import List, Optional
 from shapely.geometry import Point, Polygon
 from utils.database import supabase
 import traceback
@@ -7,9 +9,9 @@ from httpx import AsyncClient
 from dotenv import load_dotenv
 import os
 
-app = FastAPI()
-
 load_dotenv()
+
+app = FastAPI()
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 async def consulta_google_geolocation(wifi_access_points):
     url = f"https://www.googleapis.com/geolocation/v1/geolocate?key={GOOGLE_API_KEY}"
@@ -31,12 +33,10 @@ async def recibir_datos_ttn(request: Request):
         device_id = data.get("end_device_ids", {}).get("device_id", "desconocido")
         decoded_payload = data.get("uplink_message", {}).get("decoded_payload", {})
         messages = decoded_payload.get("messages", [[]])[0]
-
         latitude = None
         longitude = None
         battery = None
-        wifi_aps = []
-
+        macs = []
         for msg in messages:
             tipo = msg.get("type")
             valor = msg.get("measurementValue")
@@ -47,89 +47,67 @@ async def recibir_datos_ttn(request: Request):
             elif tipo == "Battery":
                 battery = valor
             elif tipo == "Wi-Fi Scan":
-                wifi_aps = [
-                    {"macAddress": ap["mac"], "signalStrength": int(ap["rssi"])}
-                    for ap in valor
-                ]
-
+                macs.append({
+                    "macAddress": msg.get("mac"),
+                    "signalStrength": msg.get("rssi")
+                })
         rx_metadata = data.get("uplink_message", {}).get("rx_metadata", [])
         snr = rx_metadata[0].get("snr") if rx_metadata else None
         rssi = rx_metadata[0].get("rssi") if rx_metadata else None
 
-        # Si no hay lat/lon pero hay wifi, consulta a Google
-        if (latitude is None or longitude is None) and wifi_aps:
-            try:
-                geo_resp = await consulta_google_geolocation(wifi_aps)
-                latitude = geo_resp.get("location", {}).get("lat")
-                longitude = geo_resp.get("location", {}).get("lng")
-            except Exception as e:
-                print(f"Error al consultar Google Geolocation: {e}")
-                traceback.print_exc()
-
-        if latitude is None or longitude is None:
-            print("No hay coordenadas disponibles, no se procesa el registro")
-            return {"status": "ok", "mensaje": "No coordenadas"}
-
+        if len(macs) > 0:
+            response = consulta_google_geolocation(macs)
+            latitude = response["location"]["lat"]
+            longitude = response["location"]["lon"]
         datos = supabase.table("device").select("empresas(geocercas)").eq("device_id", device_id).single().execute()
-        if datos.error or not datos.data or 'empresas' not in datos.data or 'geocercas' not in datos.data['empresas']:
-            print(f"No se encontró geocerca para el dispositivo {device_id}")
-            return {"status": "ok", "mensaje": "No geocerca"}
-
         poligono = Polygon(datos.data['empresas']['geocercas'])
         punto = Point(longitude, latitude)
-
         if poligono.contains(punto):
             print(f"Está dentro del perímetro {latitude} - {longitude}")
-
-            # Inserta historial
-            supabase.table('device_position_history').insert({
-                "device_id": device_id,
-                "battery": battery,
-                "rssi": rssi,
-                "snr": snr,
-                "lat": latitude,
-                "lon": longitude,
-                "timestamp": ahora_utc.isoformat()
+            history_response = supabase.table('device_position_history').insert({
+                "device_id":device_id,
+                "battery":battery,
+                "rssi":rssi,
+                "snr":snr,
+                "lat":latitude,
+                "lon":longitude
             }).execute()
-
-            # Actualiza o inserta posición actual
             existe = supabase.table('device_position').select("*").eq("device_id", device_id).execute()
             if existe.data:
-                supabase.table("device_position").update({
-                    "battery": battery,
-                    "last_seen": ahora_utc.isoformat(),
-                    "rssi": rssi,
-                    "snr": snr,
-                    "lat": latitude,
-                    "lon": longitude
-                }).eq("device_id", device_id).execute()
+                response = supabase.table("device_position").update({
+                "battery": battery,
+                "last_seen": ahora_utc.isoformat(),
+                "rssi": rssi,
+                "snr":snr,
+                "lat":latitude,
+                "lon":longitude}).eq("device_id", device_id).execute()
+                print(f"Resultado de UPDATE: {response}")
+                return ""
             else:
-                supabase.table("device_position").insert({
+                response = supabase.table("device_position").insert({
                     "device_id": device_id,
-                    "last_seen": ahora_utc.isoformat(),
+                    "last_seen":ahora_utc.isoformat(),
                     "battery": battery,
                     "rssi": rssi,
-                    "snr": snr,
-                    "type": "Gps",
+                    "snr":snr,
+                    "type":"Gps",
                     "dev_eui": device_id.upper(),
-                    "lat": latitude,
-                    "lon": longitude
-                }).execute()
+                    "lat":latitude,
+                    "lon":longitude}).execute()
+                print(f"Resultado de UPDATE: {response}")
+                return "" 
+            
         else:
-            print("Fuera del perímetro")
-            supabase.table('alertas').insert({
-                "desc": f"El dispositivo {device_id} está fuera del perímetro, calibrando GPS",
-                "type": "notify",
-                "timestamp": ahora_utc.isoformat()
+            print("Fuera del perimetro ahhhhhhhhhhhhhhhhhhh")
+            alert_response = supabase.table('alertas').insert({
+                "desc": f"El dispositivo {device_id} esta fuera del perimetro, calibrando GPS",
+                "type":"notify"
             }).execute()
-
-        return {"status": "ok"}
-
+        
     except ValueError as ve:
-        print(f"ValueError capturado: {ve}")
-        traceback.print_exc()
-        return {"status": "ok", "mensaje": f"Error ValueError: {ve}"}
+        print(str(ve))
+        raise HTTPException(status_code=400, detail=str(ve))
     except Exception as e:
-        print(f"Error capturado: {e}")
-        traceback.print_exc()
+        print(f"Error capturado: {e}")      # Muestra el mensaje del error
+        traceback.print_exc()                # Imprime la traza completa del error en consola
         return {"mensaje": "Error interno, pero recibido"}
