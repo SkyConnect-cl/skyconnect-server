@@ -477,61 +477,183 @@ async def handle_light(request: Request):
 
 # ================== GPS ==================
 
+def normalize_ignition(raw: Any) -> Optional[bool]:
+    """Normaliza ignition a True/False/None."""
+    if raw in (True, "true", "TRUE", 1, "1", "on", "ON"):
+        return True
+    if raw in (False, "false", "FALSE", 0, "0", "off", "OFF"):
+        return False
+    return None
+
 @app.post("/teltonika-hook")
 async def teltonikaHook(request: Request):
     data: Any = await request.json()
     ahora_utc = datetime.now(timezone.utc)
 
     # Normaliza a lista de mensajes
-    if isinstance(data, dict) and "messages" in data:
+    if isinstance(data, dict) and "messages" in data and isinstance(data["messages"], list):
         messages: List[Dict] = data["messages"]
     elif isinstance(data, list):
         messages = data
     else:
-        # Nada reconocible
         return {"ok": False, "reason": "payload format not recognized", "sample": data}
 
     received = 0
+
     for msg in messages:
         lat = msg.get("position.latitude")
         lon = msg.get("position.longitude")
         imei = msg.get("ident")
 
-        if not imei or not lat or not lon:
+        if imei is None or lat is None or lon is None:
             continue
 
-        # --- Inserta en Supabase ---
+        # Normaliza coordenadas
+        try:
+            lat_f = float(lat)
+            lon_f = float(lon)
+        except (TypeError, ValueError):
+            continue
+
+        # Ignition normalizado
+        ignition = normalize_ignition(msg.get("engine.ignition.status"))
+
+        # Extra payload (puedes agregar más campos si quieres)
         extra_payload = {
-            "ignition": msg.get("engine.ignition.status"),
             "battery_voltage": msg.get("external.powersource.voltage"),
-            "mileage": msg.get("vehicle.mileage")
+            "mileage": msg.get("vehicle.mileage"),
+            "raw_ignition": msg.get("engine.ignition.status"),
         }
 
-        payload = {
-            "device_id": imei,
-            "lat": float(lat),
-            "lon": float(lon),
-            "last_seen": ahora_utc.isoformat(),
-            "extra": extra_payload
-        }
-        received += 1
+        observed_at = ahora_utc.isoformat()
 
-        supabase.table('device_position_history').insert({
-                    "device_id": payload["device_id"],
-                    "lat": payload["lat"],
-                    "lon": payload["lon"],
-                    "observed_at": ahora_utc.isoformat()
-                }).execute()
+        # 1) Leer estado actual del vehículo (device_state)
+        state_res = (
+            supabase.table("device_state")
+            .select("device_id, ignition, current_trip_id")
+            .eq("device_id", imei)
+            .execute()
+        )
+        device_state = state_res.data[0] if state_res.data else None
+        current_trip_id = device_state["current_trip_id"] if device_state else None
 
-        existe = supabase.table('device_position').select("device_id").eq("device_id", imei).execute()
-        if existe.data:
-            supabase.table("device_position").update(payload).eq("device_id", imei).execute()
+        # 2) Lógica: crear/cerrar viaje según ignition
+        # Caso A: motor encendido
+        if ignition is True:
+            # Si no hay trip activo, crear uno
+            if current_trip_id is None:
+                trip_res = (
+                    supabase.table("trips")
+                    .insert(
+                        {
+                            "device_id": imei,
+                            "started_at": observed_at,
+                            "status": "active",
+                        }
+                    )
+                    .execute()
+                )
+                current_trip_id = trip_res.data[0]["id"]
+
+            # Upsert device_state (1 fila por IMEI)
+            supabase.table("device_state").upsert(
+                {
+                    "device_id": imei,
+                    "ignition": True,
+                    "current_trip_id": current_trip_id,
+                    "last_seen": observed_at,
+                    "last_lat": lat_f,
+                    "last_lon": lon_f,
+                }
+            ).execute()
+
+        # Caso B: motor apagado
+        elif ignition is False:
+            # Si hay trip activo, cerrarlo
+            if current_trip_id is not None:
+                supabase.table("trips").update(
+                    {
+                        "ended_at": observed_at,
+                        "status": "closed",
+                        "close_reason": "ignition_off",
+                    }
+                ).eq("id", current_trip_id).execute()
+
+            # Actualizar estado y limpiar trip activo
+            supabase.table("device_state").upsert(
+                {
+                    "device_id": imei,
+                    "ignition": False,
+                    "current_trip_id": None,
+                    "last_seen": observed_at,
+                    "last_lat": lat_f,
+                    "last_lon": lon_f,
+                }
+            ).execute()
+
+            # Para guardar el último punto asociado al viaje que se cerró,
+            # usamos una variable auxiliar:
+            # (guardamos el trip_id anterior en history)
+            # OJO: current_trip_id lo vamos a dejar como el anterior solo para history.
+            # Después de insertar history, lo dejamos "null" para el resto.
+            trip_id_for_history = current_trip_id
+            current_trip_id = None  # ya no hay viaje activo
+
+        # Caso C: ignition no viene (None)
         else:
-            payload.update({
+            # No cambiamos el estado; si existe trip activo, lo usamos para history
+            trip_id_for_history = current_trip_id
+
+        # Determinar trip_id para guardar en history
+        if ignition is False:
+            # en apagado, usamos el trip anterior (si existía)
+            history_trip_id = trip_id_for_history
+        elif ignition is None:
+            history_trip_id = trip_id_for_history
+        else:
+            # ignition True
+            history_trip_id = current_trip_id
+
+        # 3) Insertar coordenada en vehicle_position_history (tu tabla nueva)
+        supabase.table("vehicle_position_history").insert(
+            {
                 "device_id": imei,
-                "type": "Vehicle",
-                "dev_eui": (imei).upper()
-            })
-            supabase.table("device_position").insert(payload).execute()
+                "trip_id": history_trip_id,  # puede ser NULL si no hay viaje
+                "lat": lat_f,
+                "lon": lon_f,
+                "observed_at": observed_at,
+                "ignition": ignition,
+                "extra": extra_payload,
+            }
+        ).execute()
+
+        # 4) Actualizar posición actual (device_position) como ya lo hacías
+        payload_current = {
+            "device_id": imei,
+            "lat": lat_f,
+            "lon": lon_f,
+            "last_seen": observed_at,
+            "extra": {**extra_payload, "ignition": ignition, "trip_id": history_trip_id},
+        }
+
+        existe = (
+            supabase.table("device_position")
+            .select("device_id")
+            .eq("device_id", imei)
+            .execute()
+        )
+
+        if existe.data:
+            supabase.table("device_position").update(payload_current).eq("device_id", imei).execute()
+        else:
+            payload_current.update(
+                {
+                    "type": "Vehicle",
+                    "dev_eui": str(imei).upper(),
+                }
+            )
+            supabase.table("device_position").insert(payload_current).execute()
+
+        received += 1
 
     return {"ok": True, "received": received}
