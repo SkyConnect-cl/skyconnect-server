@@ -9,7 +9,7 @@ import traceback
 import json
 import hashlib, hmac, base64, requests, os
 from email.utils import formatdate
-from typing import Any, List, Dict
+from typing import Any, List, Dict, Optional
 
 
 load_dotenv()
