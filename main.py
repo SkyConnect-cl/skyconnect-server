@@ -529,7 +529,7 @@ async def teltonikaHook(request: Request):
 
         # 1) Leer estado actual del vehículo (device_state)
         state_res = (
-            supabase.table("device_state")
+            supabase.table("vehicle_state")
             .select("device_id, ignition, current_trip_id")
             .eq("device_id", imei)
             .execute()
@@ -556,7 +556,7 @@ async def teltonikaHook(request: Request):
                 current_trip_id = trip_res.data[0]["id"]
 
             # Upsert device_state (1 fila por IMEI)
-            supabase.table("device_state").upsert(
+            supabase.table("vehicle_state").upsert(
                 {
                     "device_id": imei,
                     "ignition": True,
@@ -580,7 +580,7 @@ async def teltonikaHook(request: Request):
                 ).eq("id", current_trip_id).execute()
 
             # Actualizar estado y limpiar trip activo
-            supabase.table("device_state").upsert(
+            supabase.table("vehicle_state").upsert(
                 {
                     "device_id": imei,
                     "ignition": False,
