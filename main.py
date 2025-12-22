@@ -480,7 +480,6 @@ async def handle_light(request: Request):
 @app.post("/teltonika-hook")
 async def teltonikaHook(request: Request):
     data: Any = await request.json()
-    print(data)
     ahora_utc = datetime.now(timezone.utc)
 
     # Normaliza a lista de mensajes
