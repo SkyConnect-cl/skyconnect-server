@@ -18,7 +18,7 @@ app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173"],   # ajusta según tu frontend
+    allow_origins=["http://localhost:5173", "https://staging.d1pyeozqgfv4iy.amplifyapp.com"],   # ajusta según tu frontend
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -657,3 +657,4 @@ async def teltonikaHook(request: Request):
         received += 1
 
     return {"ok": True, "received": received}
+
