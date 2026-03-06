@@ -385,18 +385,33 @@ async def abee_ttn(request: Request):
 @app.post("/emqx-webhook")
 async def emqx_webhook(req: Request):
     data = await req.json()
+    print(data)
     try:
         topic_id = data['clientid']
-        print(topic_id)
+        topic = data["topic"]
+        print(topic)
         if data.get('payload'):
             datos = json.loads(data['payload'])
-            if "contact" in datos:
+            print(datos)
+            if "tablero" in topic:
                 contacto = {"estado": "Cerrado" if datos["contact"] else "Abierto", "battery": datos.get('battery')}
                 supabase.table("tower_value").update({"sensor_apertura": contacto}).eq("client_id", topic_id).execute()
                 print(contacto)
-            elif "illuminance" in datos:
+            if "domotica" in topic:
+                contacto = {"estado": "Cerrado" if datos["contact"] else "Abierto", "battery": datos.get('battery')}
+                supabase.table("tower_value").update({"domotica": contacto}).eq("client_id", topic_id).execute()
+                print(contacto)
+            if "illuminance" in datos:
                 contacto = {"iluminancia": datos["illuminance"], "battery": datos.get('battery')}
                 supabase.table("tower_value").update({"sensor_luz": contacto}).eq("client_id", topic_id).execute()
+                print(contacto)
+            if "switch" in topic:
+                contacto = {"estado": datos["state"], "id":topic}
+                supabase.table("tower_value").update({"enchufe": contacto}).eq("client_id", topic_id).execute()
+                print(contacto)
+            if "luz" in topic:
+                contacto = {"estado": datos["state"], "id":topic}
+                supabase.table("tower_value").update({"luz": contacto}).eq("client_id", topic_id).execute()
                 print(contacto)
             return {"ok": True}
     except Exception as e:
@@ -449,14 +464,24 @@ IOT_PASS = os.getenv("IOT_PASS")
 
 @app.post("/handle-light")
 async def handle_light(request: Request):
-    data = await request.json()
+    try:
+        data = await request.json()
+        print(data)
+    except Exception:
+        raise HTTPException(status_code=400, detail="JSON inválido")
+
     state = data.get("state", "").upper()
+    topic = data.get("topic", "")
+
+    if not topic:
+        raise HTTPException(status_code=400, detail="Topic requerido")
+
     if state not in ["ON", "OFF"]:
-        return {"error": "Estado inválido"}
+        raise HTTPException(status_code=400, detail="Estado inválido")
 
     payload = {
         "payload_encoding": "plain",
-        "topic": "zigbee2mqtt/smart_switch/set",
+        "topic": f"{topic}/set",
         "payload": f'{{"state": "{state}"}}'
     }
 
@@ -468,12 +493,26 @@ async def handle_light(request: Request):
             headers={"Content-Type": "application/json"},
             timeout=5
         )
-        print(f"Luz {state} enviada correctamente")
-        return {"status": res.status_code, "response": res.text}
-    except Exception as e:
-        print(f"Error al enviar luz: {e}")
-        return {"error": str(e)}
-    
+
+        # ❗ Si el broker responde mal
+        if res.status_code >= 400:
+            raise HTTPException(
+                status_code=502,
+                detail=f"Error IoT broker: {res.text}"
+            )
+
+        return {
+            "ok": True,
+            "state": state,
+            "broker_status": res.status_code
+        }
+
+    except requests.exceptions.Timeout:
+        raise HTTPException(status_code=504, detail="Timeout al conectar con IoT")
+
+    except requests.exceptions.RequestException as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 # ================== GPS ==================
 
@@ -514,6 +553,10 @@ async def teltonikaHook(request: Request):
             lon_f = float(lon)
         except (TypeError, ValueError):
             continue
+
+        if str(imei) == "864292048971244":
+            supabase.table("tower_value").update({"lat":lat_f,"lon":lon_f}).eq("device_id","Primera Torre").execute()
+            return
 
         # Ignition normalizado
         ignition = normalize_ignition(msg.get("engine.ignition.status"))
