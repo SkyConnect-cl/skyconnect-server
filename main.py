@@ -387,9 +387,9 @@ async def emqx_webhook(req: Request):
     data = await req.json()
     print(data)
     try:
-        topic_id = data['clientid']
         topic = data["topic"]
-        print(topic)
+        topic_id = topic.strip("/").split("/")[0]
+
         if data.get('payload'):
             datos = json.loads(data['payload'])
             print(datos)
