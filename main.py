@@ -542,6 +542,7 @@ async def teltonikaHook(request: Request):
     for msg in messages:
         lat = msg.get("position.latitude")
         lon = msg.get("position.longitude")
+        speed = msg.get("position.speed")
         imei = msg.get("ident")
 
         if imei is None or lat is None or lon is None:
@@ -565,6 +566,7 @@ async def teltonikaHook(request: Request):
         extra_payload = {
             "battery_voltage": msg.get("external.powersource.voltage"),
             "mileage": msg.get("vehicle.mileage"),
+            "speed":speed,
             "raw_ignition": msg.get("engine.ignition.status"),
         }
 
