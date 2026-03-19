@@ -18,7 +18,7 @@ app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "https://staging.d1pyeozqgfv4iy.amplifyapp.com"],   # ajusta según tu frontend
+    allow_origins=["http://localhost:5173", "https://staging.d1pyeozqgfv4iy.amplifyapp.com", "https://staging.d7hc20uuc89gh.amplifyapp.com"],   # ajusta según tu frontend
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
