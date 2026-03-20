@@ -240,11 +240,12 @@ async def abee_ttn(request: Request):
         end_ids = data.get("end_device_ids") or data.get("data", {}).get("end_device_ids") or {}
         device_id = end_ids.get("device_id")
         dev_eui = end_ids.get("dev_eui") or end_ids.get("devEui")
+
         if not device_id:
             raise HTTPException(status_code=400, detail="No se encontró device_id")
 
         # === Uplink y payload ===
-        uplink = (data.get("uplink_message") or data.get("data", {}).get("uplink_message") or {})
+        uplink = data.get("uplink_message") or data.get("data", {}).get("uplink_message") or {}
         decoded = uplink.get("decoded_payload") or {}
 
         # === BLE primero (prioridad) ===
@@ -256,129 +257,141 @@ async def abee_ttn(request: Request):
         rssi = rx_metadata[0].get("rssi") if rx_metadata else None
         snr = rx_metadata[0].get("snr") if rx_metadata else None
 
-        # --- Si trae BLE, ignoramos GNSS ---
+        # ---------------------------------------------------
+        # 1) Si trae BLE, ignoramos GNSS
+        # ---------------------------------------------------
         if ble_list:
             print(f"[BLE] {device_id} detectó {len(ble_list)} balizas")
 
-            # Lista de hits BLE
             ble_hits = []
             for b in ble_list:
                 mac = b.get("id")
                 if mac:
                     try:
                         rssi_val = int(b.get("rssi"))
-                    except:
+                    except Exception:
                         rssi_val = None
-                    ble_hits.append({"mac": mac, "rssi": rssi_val})
+
+                    ble_hits.append({
+                        "mac": mac,
+                        "rssi": rssi_val
+                    })
 
             # Ordenar por RSSI descendente
-            ble_hits.sort(key=lambda h: (h["rssi"] if h["rssi"] is not None else -9999), reverse=True)
+            ble_hits.sort(
+                key=lambda h: h["rssi"] if h["rssi"] is not None else -9999,
+                reverse=True
+            )
 
-            # Buscar beacon más cercano
-            lat_ble = lon_ble = beacon_mac = None
+            lat_ble = None
+            lon_ble = None
+            beacon_mac = None
+
             for hit in ble_hits:
                 mac = hit["mac"]
                 res = supabase.table("beacons").select("lat, lon").eq("mac", mac).limit(1).execute()
                 row = res.data[0] if res.data else None
+
                 if row and row.get("lat") is not None and row.get("lon") is not None:
                     lat_ble = float(row["lat"])
                     lon_ble = float(row["lon"])
                     beacon_mac = mac
                     break
 
-            if lat_ble and lon_ble:
-                # Verificar geocerca
-                datos = supabase.table("device").select("empresas(geocercas)").eq("device_id", device_id).single().execute()
-                geocerca_raw = datos.data['empresas']['geocercas']
-                if isinstance(geocerca_raw, str):
-                    geocerca_raw = json.loads(geocerca_raw)
-                poligono = Polygon(geocerca_raw)
-                punto = Point(lon_ble, lat_ble)
+            if lat_ble is not None and lon_ble is not None:
+                print(f"[POS] {device_id} posición por BLE→{beacon_mac} ({lat_ble}, {lon_ble})")
 
-                if poligono.contains(punto):
-                    print(f"[POS] {device_id} dentro del perímetro (BLE→{beacon_mac}) ({lat_ble}, {lon_ble})")
+                supabase.table("device_position_history").insert({
+                    "device_id": device_id,
+                    "battery": battery_percent,
+                    "rssi": rssi,
+                    "snr": snr,
+                    "lat": lat_ble,
+                    "lon": lon_ble,
+                    "observed_at": ahora_utc.isoformat()
+                }).execute()
 
-                    supabase.table('device_position_history').insert({
-                        "device_id": device_id,
-                        "battery": battery_percent,
-                        "rssi": rssi,
-                        "snr": snr,
-                        "lat": lat_ble,
-                        "lon": lon_ble,
-                        "observed_at": ahora_utc.isoformat()
-                    }).execute()
+                data_pos = {
+                    "battery": battery_percent,
+                    "last_seen": ahora_utc.isoformat(),
+                    "rssi": rssi,
+                    "snr": snr,
+                    "lat": lat_ble,
+                    "lon": lon_ble
+                }
 
-                    data_pos = {
-                        "battery": battery_percent,
-                        "last_seen": ahora_utc.isoformat(),
-                        "rssi": rssi,
-                        "snr": snr,
-                        "lat": lat_ble,
-                        "lon": lon_ble
-                    }
-                    existe = supabase.table('device_position').select("device_id").eq("device_id", device_id).execute()
-                    if existe.data:
-                        supabase.table("device_position").update(data_pos).eq("device_id", device_id).execute()
-                    else:
-                        data_pos.update({
-                            "device_id": device_id,
-                            "type": "Gps",
-                            "dev_eui": (dev_eui or device_id).upper()
-                        })
-                        supabase.table("device_position").insert(data_pos).execute()
+                existe = supabase.table("device_position").select("device_id").eq("device_id", device_id).execute()
+
+                if existe.data:
+                    supabase.table("device_position").update(data_pos).eq("device_id", device_id).execute()
                 else:
-                    print(f"[POS] {device_id} fuera del perímetro (BLE→{beacon_mac})")
-                    supabase.table('alertas').insert({
-                        "desc": f"El dispositivo {device_id} está fuera del perímetro (BLE→{beacon_mac})",
-                        "type": "notify",
-                        "created_at": ahora_utc.isoformat()
-                    }).execute()
+                    data_pos.update({
+                        "device_id": device_id,
+                        "type": "Gps",
+                        "dev_eui": (dev_eui or device_id).upper()
+                    })
+                    supabase.table("device_position").insert(data_pos).execute()
+
                 return {"status": "ok"}
 
-            print(f"[BLE] {device_id} sin coincidencias en tabla beacons. {mac}")
+            print(f"[BLE] {device_id} sin coincidencias válidas en tabla beacons")
             return {"status": "ok"}
 
-        # === Si NO hay BLE, usar GNSS ===
+        # ---------------------------------------------------
+        # 2) Si NO hay BLE, usar GNSS
+        # ---------------------------------------------------
         loc = (uplink.get("locations") or {}).get("frm-payload") or {}
         lat = loc.get("latitude")
         lon = loc.get("longitude")
 
         if lat is not None and lon is not None:
-            datos = supabase.table("device").select("empresas(geocercas)").eq("device_id", device_id).single().execute()
-            geocerca_raw = datos.data['empresas']['geocercas']
-            if isinstance(geocerca_raw, str):
-                geocerca_raw = json.loads(geocerca_raw)
-            poligono = Polygon(geocerca_raw)
-            punto = Point(float(lon), float(lat))
+            lat = float(lat)
+            lon = float(lon)
 
-            if poligono.contains(punto):
-                print(f"[POS] {device_id} dentro del perímetro (GNSS) ({lat}, {lon})")
-                supabase.table('device_position_history').insert({
-                    "device_id": device_id,
-                    "battery": battery_percent,
-                    "rssi": rssi,
-                    "snr": snr,
-                    "lat": lat,
-                    "lon": lon,
-                    "observed_at": ahora_utc.isoformat()
-                }).execute()
+            print(f"[POS] {device_id} posición por GNSS ({lat}, {lon})")
+
+            supabase.table("device_position_history").insert({
+                "device_id": device_id,
+                "battery": battery_percent,
+                "rssi": rssi,
+                "snr": snr,
+                "lat": lat,
+                "lon": lon,
+                "observed_at": ahora_utc.isoformat()
+            }).execute()
+
+            data_pos = {
+                "battery": battery_percent,
+                "last_seen": ahora_utc.isoformat(),
+                "rssi": rssi,
+                "snr": snr,
+                "lat": lat,
+                "lon": lon
+            }
+
+            existe = supabase.table("device_position").select("device_id").eq("device_id", device_id).execute()
+
+            if existe.data:
+                supabase.table("device_position").update(data_pos).eq("device_id", device_id).execute()
             else:
-                print(f"[POS] {device_id} fuera del perímetro (GNSS)")
-                supabase.table('alertas').insert({
-                    "desc": f"El dispositivo {device_id} está fuera del perímetro (GNSS)",
-                    "type": "notify",
-                    "created_at": ahora_utc.isoformat()
-                }).execute()
+                data_pos.update({
+                    "device_id": device_id,
+                    "type": "Gps",
+                    "dev_eui": (dev_eui or device_id).upper()
+                })
+                supabase.table("device_position").insert(data_pos).execute()
+
             return {"status": "ok"}
 
-        # === Sin BLE ni GNSS ===
+        # ---------------------------------------------------
+        # 3) Sin BLE ni GNSS
+        # ---------------------------------------------------
         raise HTTPException(status_code=400, detail="Faltan coordenadas BLE y GNSS en el payload")
 
     except Exception as e:
         print(f"[ERR] /abee-ttn: {e}")
         traceback.print_exc()
         return {"mensaje": "Error interno, pero recibido"}
-
 
 # ================== EMQX WEBHOOK ==================
 
