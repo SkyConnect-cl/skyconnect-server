@@ -406,6 +406,9 @@ async def emqx_webhook(req: Request):
         if data.get('payload'):
             datos = json.loads(data['payload'])
             print(datos)
+            if "pertiga" in topic:
+                contacto = {"estado": "Cerrado" if datos["contact"] else "Abierto", "battery": datos.get('battery')}
+                supabase.table("tower_value").update({"pertiga": contacto}).eq("client_id", topic_id).execute()
             if "tablero" in topic:
                 contacto = {"estado": "Cerrado" if datos["contact"] else "Abierto", "battery": datos.get('battery')}
                 supabase.table("tower_value").update({"sensor_apertura": contacto}).eq("client_id", topic_id).execute()
