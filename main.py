@@ -570,6 +570,12 @@ async def teltonikaHook(request: Request):
 
         if str(imei) == "864292048971244":
             supabase.table("tower_value").update({"lat":lat_f,"lon":lon_f}).eq("device_id","Primera Torre").execute()
+            supabase.table("tower_position_history").insert({
+                "lat":lat_f,
+                "lon":lon_f,
+                "imei": str(imei)
+            }).execute()
+
             return
 
         # Ignition normalizado
