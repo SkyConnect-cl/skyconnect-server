@@ -571,15 +571,6 @@ async def teltonikaHook(request: Request):
         except (TypeError, ValueError):
             continue
 
-        if str(imei) == "864292048971244":
-            supabase.table("tower_value").update({"lat":lat_f,"lon":lon_f}).eq("device_id","Primera Torre").execute()
-            supabase.table("tower_position_history").insert({
-                "lat":lat_f,
-                "lon":lon_f,
-                "imei": str(imei)
-            }).execute()
-
-            return
 
         # Ignition normalizado
         ignition = normalize_ignition(msg.get("engine.ignition.status"))
@@ -593,6 +584,17 @@ async def teltonikaHook(request: Request):
         }
 
         observed_at = ahora_utc.isoformat()
+
+        if str(imei) == "864292048971244":
+            supabase.table("tower_value").update({"lat":lat_f,"lon":lon_f}).eq("device_id","Primera Torre").execute()
+            supabase.table("tower_position_history").insert({
+                "lat":lat_f,
+                "lon":lon_f,
+                "imei": str(imei),
+                "extra": extra_payload
+            }).execute()
+
+            return
 
         # 1) Leer estado actual del vehículo (device_state)
         state_res = (
