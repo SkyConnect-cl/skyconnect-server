@@ -586,7 +586,7 @@ async def teltonikaHook(request: Request):
         observed_at = ahora_utc.isoformat()
 
         if str(imei) == "864292048971244":
-            supabase.table("tower_value").update({"lat":lat_f,"lon":lon_f}).eq("device_id","Primera Torre").execute()
+            supabase.table("tower_value").update({"lat":lat_f,"lon":lon_f,"extra":extra_payload}).eq("device_id","Primera Torre").execute()
             supabase.table("tower_position_history").insert({
                 "lat":lat_f,
                 "lon":lon_f,
