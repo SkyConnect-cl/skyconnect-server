@@ -758,7 +758,12 @@ async def recibir_nmea(request: Request):
 
     lat = nmea_a_grados(data.get("lat"), data.get("lat_d"))
     lon = nmea_a_grados(data.get("lon"), data.get("lon_d"))
-    vel_kmh = round(float(data.get("vel_nudos") or 0) * 1.852, 1)
+
+    try:
+        vel_kmh = round(float(data.get("vel_nudos") or 0) * 1.852, 1)
+    except (ValueError, TypeError):
+        return {"ok": True}                  # velocidad inválida, ignorar trama
+
     device_id = data.get("device_id")
 
     if lat is None or lon is None:
