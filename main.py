@@ -727,3 +727,65 @@ async def teltonikaHook(request: Request):
 
     return {"ok": True, "received": received}
 
+from fastapi.responses import PlainTextResponse
+
+def nmea_a_grados(valor, direccion):
+    """Convierte NMEA (ddmm.mmmm) a grados decimales para Google Maps."""
+    if not valor:
+        return None
+    try:
+        punto = valor.find(".")
+        grados = int(valor[:punto - 2])      # dd o ddd
+        minutos = float(valor[punto - 2:])   # mm.mmmm
+        decimal = grados + minutos / 60
+        if direccion in ("S", "W"):
+            decimal = -decimal
+        return round(decimal, 6)
+    except (ValueError, IndexError):
+        return None
+
+
+@app.post("/rut956-nmea")
+async def recibir_nmea(request: Request):
+    ahora_utc = datetime.now(timezone.utc)
+    try:
+        data = await request.json()
+    except Exception:
+        return {"ok": False}                 # trama corrupta, ignorar
+
+    if data.get("estado") != "A":            # sin fix, no procesar
+        return {"ok": True}
+
+    lat = nmea_a_grados(data.get("lat"), data.get("lat_d"))
+    lon = nmea_a_grados(data.get("lon"), data.get("lon_d"))
+    vel_kmh = round(float(data.get("vel_nudos") or 0) * 1.852, 1)
+    device_id = data.get("device_id")
+
+    if lat is None or lon is None:
+        return {"ok": True}
+
+    registro = {
+        "lat": lat,                                  # grados decimales, listo para Maps
+        "lon": lon,
+        "last_seen": ahora_utc.isoformat(),
+        "extra": {
+            "vel_kmh": vel_kmh,                          # km/h
+            "ignicion": data.get("ignicion") == "1",     # True = prendida, False = apagada
+            "motivo": data.get("motivo", "periodico"),
+
+        }
+         
+    }
+
+    existe = supabase.table("device_position").select("device_id").eq("device_id", device_id).execute()
+
+    if existe.data:
+        supabase.table("device_position").update(registro).eq("device_id", device_id).execute()
+    else:
+        registro.update({
+            "device_id": device_id,
+            "type": "Train",
+            "dev_eui": (device_id).upper()
+        })
+        supabase.table("device_position").insert(registro).execute()
+    return {"status": "ok"}
