@@ -789,7 +789,7 @@ async def recibir_nmea(request: Request):
                 "lat": lat,
                 "lon": lon,
                 "observed_at": ahora_utc.isoformat(),
-                "ignition": "",
+                "ignition": False,
                 "extra": registro["extra"],
             }
         ).execute()
