@@ -785,7 +785,7 @@ async def recibir_nmea(request: Request):
     supabase.table("vehicle_position_history").insert(
             {
                 "device_id": device_id,
-                "trip_id": "",  # puede ser NULL si no hay viaje
+                "trip_id": None,  # puede ser NULL si no hay viaje
                 "lat": lat,
                 "lon": lon,
                 "observed_at": ahora_utc.isoformat(),
