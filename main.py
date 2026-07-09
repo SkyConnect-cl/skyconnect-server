@@ -398,41 +398,147 @@ async def abee_ttn(request: Request):
 @app.post("/emqx-webhook")
 async def emqx_webhook(req: Request):
     data = await req.json()
-    print(data)
+    print("EMQX WEBHOOK:", data)
+
     try:
-        topic = data["topic"]
+        topic = data.get("topic")
+        mqtt_clientid = data.get("clientid")
+
+        if not topic:
+            return {
+                "ok": False,
+                "error": "No viene topic",
+            }
+
         topic_id = topic.strip("/").split("/")[0]
 
-        if data.get('payload'):
-            datos = json.loads(data['payload'])
-            print(datos)
-            if "pertiga" in topic:
-                contacto = {"estado": datos["state"], "id":topic}
-                supabase.table("tower_value").update({"pertiga": contacto}).eq("client_id", topic_id).execute()
-            if "tablero" in topic:
-                contacto = {"estado": "Cerrado" if datos["contact"] else "Abierto", "battery": datos.get('battery')}
-                supabase.table("tower_value").update({"sensor_apertura": contacto}).eq("client_id", topic_id).execute()
-                print(contacto)
-            if "domotica" in topic:
-                contacto = {"estado": "Cerrado" if datos["contact"] else "Abierto", "battery": datos.get('battery')}
-                supabase.table("tower_value").update({"domotica": contacto}).eq("client_id", topic_id).execute()
-                print(contacto)
-            if "illuminance" in datos:
-                contacto = {"iluminancia": datos["illuminance"], "battery": datos.get('battery')}
-                supabase.table("tower_value").update({"sensor_luz": contacto}).eq("client_id", topic_id).execute()
-                print(contacto)
-            if "switch" in topic:
-                contacto = {"estado": datos["state"], "id":topic}
-                supabase.table("tower_value").update({"enchufe": contacto}).eq("client_id", topic_id).execute()
-                print(contacto)
-            if "luz" in topic:
-                contacto = {"estado": datos["state"], "id":topic}
-                supabase.table("tower_value").update({"luz": contacto}).eq("client_id", topic_id).execute()
-                print(contacto)
-            return {"ok": True}
-    except Exception as e:
-        print(f"Error EMQX: {e}")
+        raw_payload = data.get("payload")
 
+        if not raw_payload:
+            return {
+                "ok": True,
+                "ignored": "sin payload",
+                "topic": topic,
+                "clientid": mqtt_clientid,
+            }
+
+        if isinstance(raw_payload, str):
+            datos = json.loads(raw_payload)
+        elif isinstance(raw_payload, dict):
+            datos = raw_payload
+        else:
+            return {
+                "ok": False,
+                "error": "payload inválido",
+                "payload": raw_payload,
+            }
+
+        print("topic:", topic)
+        print("topic_id:", topic_id)
+        print("mqtt_clientid:", mqtt_clientid)
+        print("datos:", datos)
+
+        update_data = {
+            "online": True,
+            "mqtt_clientid": mqtt_clientid,
+            "mqtt_reason": None,
+        }
+
+        if "pertiga" in topic:
+            update_data["pertiga"] = {
+                "estado": datos["state"],
+                "id": topic,
+            }
+
+        if "tablero" in topic:
+            update_data["sensor_apertura"] = {
+                "estado": "Cerrado" if datos["contact"] else "Abierto",
+                "battery": datos.get("battery"),
+            }
+
+        if "domotica" in topic:
+            update_data["domotica"] = {
+                "estado": "Cerrado" if datos["contact"] else "Abierto",
+                "battery": datos.get("battery"),
+            }
+
+        if "illuminance" in datos:
+            update_data["sensor_luz"] = {
+                "iluminancia": datos["illuminance"],
+                "battery": datos.get("battery"),
+            }
+
+        if "switch" in topic:
+            update_data["enchufe"] = {
+                "estado": datos["state"],
+                "id": topic,
+            }
+
+        if "luz" in topic:
+            update_data["luz"] = {
+                "estado": datos["state"],
+                "id": topic,
+            }
+
+        supabase.table("tower_value") \
+            .update(update_data) \
+            .eq("client_id", topic_id) \
+            .execute()
+
+        return {
+            "ok": True,
+            "event": "message",
+            "topic": topic,
+            "topic_id": topic_id,
+            "clientid": mqtt_clientid,
+            "online": True,
+        }
+
+    except Exception as e:
+        print(f"Error EMQX webhook: {e}")
+        return {
+            "ok": False,
+            "error": str(e),
+        }
+
+@app.post("/emqx-client-disconnected")
+async def emqx_client_disconnected(req: Request):
+    data = await req.json()
+    print("EMQX CLIENT DISCONNECTED:", data)
+
+    try:
+        mqtt_clientid = data.get("clientid")
+        reason = data.get("reason")
+
+        if not mqtt_clientid:
+            return {
+                "ok": False,
+                "error": "No viene clientid",
+            }
+
+        result = supabase.table("tower_value") \
+            .update({
+                "online": False,
+                "mqtt_reason": reason,
+            }) \
+            .eq("mqtt_clientid", mqtt_clientid) \
+            .execute()
+
+        return {
+            "ok": True,
+            "event": "disconnected",
+            "clientid": mqtt_clientid,
+            "online": False,
+            "reason": reason,
+            "updated": result.data,
+        }
+
+    except Exception as e:
+        print(f"Error EMQX disconnected: {e}")
+        return {
+            "ok": False,
+            "error": str(e),
+        }
 # ================== INVERTER (SOLISCLOUD) ==================
 
 API_ID = os.getenv("API_ID")
