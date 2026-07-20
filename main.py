@@ -464,14 +464,16 @@ async def emqx_webhook(req: Request):
 
         if "illuminance" in datos:
             update_data["sensor_luz"] = {
-                "iluminancia": datos["illuminance"],
-                "battery": datos.get("battery"),
+                "iluminancia": datos["illuminance"]
             }
-
-        if "switch" in topic:
-            update_data["enchufe"] = {
-                "estado": datos["state"],
-                "id": topic,
+        
+        if "temperature" in datos:
+            update_data["temperature"] = {
+                "temperature": datos["temperature"]
+            }
+        if "humidity" in datos:
+            update_data["humidity"] = {
+                "humidity": datos["humidity"]
             }
 
         if "luz" in topic:
