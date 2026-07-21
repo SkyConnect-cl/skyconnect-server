@@ -504,12 +504,13 @@ async def emqx_webhook(req: Request):
         }
 
 @app.post("/emqx-client-disconnected")
-async def emqx_client_disconnected(req: Request):
-    data = await req.json()
-    print("EMQX CLIENT DISCONNECTED:", data)
-
+async def emqx_client_status(req: Request):
     try:
+        data = await req.json()
+        print("EMQX CLIENT STATUS:", data)
+
         mqtt_clientid = data.get("clientid")
+        event = data.get("event")
         reason = data.get("reason")
 
         if not mqtt_clientid:
@@ -518,25 +519,43 @@ async def emqx_client_disconnected(req: Request):
                 "error": "No viene clientid",
             }
 
-        result = supabase.table("tower_value") \
+        if event == "client.connected":
+            online = True
+            mqtt_reason = None
+
+        elif event == "client.disconnected":
+            online = False
+            mqtt_reason = reason
+
+        else:
+            return {
+                "ok": False,
+                "error": "Evento desconocido",
+                "event": event,
+            }
+
+        result = (
+            supabase.table("tower_value")
             .update({
-                "online": False,
-                "mqtt_reason": reason,
-            }) \
-            .eq("mqtt_clientid", mqtt_clientid) \
+                "online": online,
+                "mqtt_reason": mqtt_reason,
+            })
+            .eq("mqtt_clientid", mqtt_clientid)
             .execute()
+        )
 
         return {
             "ok": True,
-            "event": "disconnected",
+            "event": event,
             "clientid": mqtt_clientid,
-            "online": False,
-            "reason": reason,
+            "online": online,
+            "reason": mqtt_reason,
             "updated": result.data,
         }
 
     except Exception as e:
-        print(f"Error EMQX disconnected: {e}")
+        print(f"Error EMQX client status: {e}")
+
         return {
             "ok": False,
             "error": str(e),
