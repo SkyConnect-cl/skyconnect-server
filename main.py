@@ -394,14 +394,119 @@ async def abee_ttn(request: Request):
         return {"mensaje": "Error interno, pero recibido"}
 
 # ================== EMQX WEBHOOK ==================
+import asyncio
+import uuid
+import requests
+
+from fastapi import BackgroundTasks, Request
+def normalize_emqx_topic(topic: str) -> str:
+    topic = str(topic or "").strip()
+
+    # Por si EMQX Cloud agrega $tenants/TENANT_ID/
+    if topic.startswith("$tenants/"):
+        parts = topic.split("/", 2)
+
+        if len(parts) == 3:
+            topic = parts[2]
+
+    return topic.strip("/")
+
+
+def parse_mqtt_payload(raw_payload):
+    if isinstance(raw_payload, dict):
+        return raw_payload
+
+    if isinstance(raw_payload, str):
+        return json.loads(raw_payload)
+
+    raise ValueError("Payload MQTT inválido")
+
+
+def normalize_on_off(value):
+    state = str(value or "").strip().upper()
+
+    if state in {"ON", "OFF"}:
+        return state
+
+    return None
+
+
+async def publish_emqx_message(
+    topic: str,
+    payload: dict,
+    retain: bool = False,
+):
+    body = {
+        "payload_encoding": "plain",
+        "topic": topic,
+        "payload": json.dumps(payload),
+        "qos": 1,
+        "retain": retain,
+    }
+
+    response = await asyncio.to_thread(
+        requests.post,
+        IOT_URL,
+        json=body,
+        auth=(IOT_USER, IOT_PASS),
+        headers={"Content-Type": "application/json"},
+        timeout=10,
+    )
+
+    if response.status_code not in (200, 202):
+        raise RuntimeError(
+            f"EMQX respondió {response.status_code}: {response.text}"
+        )
+
+    print(
+        "EMQX MESSAGE PUBLISHED:",
+        {
+            "topic": topic,
+            "status": response.status_code,
+        },
+    )
+
+
+async def request_ha_states_after_connect(
+    client_id: str,
+    mqtt_clientid: str,
+):
+    # Le damos tiempo a Node-RED y Home Assistant para quedar disponibles.
+    await asyncio.sleep(10)
+
+    request_id = str(uuid.uuid4())
+
+    try:
+        await publish_emqx_message(
+            topic=f"{client_id}/state/request",
+            payload={
+                "request_id": request_id,
+                "client_id": client_id,
+                "mqtt_clientid": mqtt_clientid,
+            },
+            retain=False,
+        )
+
+        print(
+            "HA STATE REQUEST SENT:",
+            {
+                "client_id": client_id,
+                "request_id": request_id,
+            },
+        )
+
+    except Exception as error:
+        print(
+            f"Error solicitando estados de {client_id}: {error}"
+        )
 
 @app.post("/emqx-webhook")
 async def emqx_webhook(req: Request):
-    data = await req.json()
-    print("EMQX WEBHOOK:", data)
-
     try:
-        topic = data.get("topic")
+        data = await req.json()
+        print("EMQX WEBHOOK:", data)
+
+        topic = normalize_emqx_topic(data.get("topic"))
         mqtt_clientid = data.get("clientid")
 
         if not topic:
@@ -410,11 +515,10 @@ async def emqx_webhook(req: Request):
                 "error": "No viene topic",
             }
 
-        topic_id = topic.strip("/").split("/")[0]
-
+        topic_id = topic.split("/")[0]
         raw_payload = data.get("payload")
 
-        if not raw_payload:
+        if raw_payload in (None, ""):
             return {
                 "ok": True,
                 "ignored": "sin payload",
@@ -422,70 +526,151 @@ async def emqx_webhook(req: Request):
                 "clientid": mqtt_clientid,
             }
 
-        if isinstance(raw_payload, str):
-            datos = json.loads(raw_payload)
-        elif isinstance(raw_payload, dict):
-            datos = raw_payload
-        else:
-            return {
-                "ok": False,
-                "error": "payload inválido",
-                "payload": raw_payload,
-            }
+        datos = parse_mqtt_payload(raw_payload)
 
         print("topic:", topic)
         print("topic_id:", topic_id)
         print("mqtt_clientid:", mqtt_clientid)
         print("datos:", datos)
 
+        # El backend publica esta solicitud.
+        # No debe modificar la base de datos.
+        if topic.endswith("/state/request"):
+            return {
+                "ok": True,
+                "ignored": "solicitud de estados",
+                "topic": topic,
+            }
+
+        # Respuesta de Node-RED con los estados actuales de Home Assistant.
+        if topic.endswith("/state/response"):
+            client_id = str(
+                datos.get("client_id") or topic_id
+            ).strip()
+
+            states = datos.get("states")
+
+            if not isinstance(states, dict):
+                return {
+                    "ok": False,
+                    "error": "La respuesta no contiene states",
+                }
+
+            update_data = {
+                "online": True,
+                "mqtt_clientid": mqtt_clientid,
+                "mqtt_reason": None,
+            }
+
+            for field in ("luz", "pertiga", "enchufe"):
+                value = states.get(field)
+
+                if isinstance(value, dict):
+                    state = normalize_on_off(
+                        value.get("estado") or value.get("state")
+                    )
+
+                else:
+                    state = normalize_on_off(value)
+
+                if state:
+                    update_data[field] = {
+                        "estado": state,
+                        "id": f"{client_id}/{field}",
+                    }
+
+            if len(update_data) == 3:
+                return {
+                    "ok": False,
+                    "error": "La respuesta no contiene estados válidos",
+                    "states": states,
+                }
+
+            result = (
+                supabase.table("tower_value")
+                .update(update_data)
+                .eq("client_id", client_id)
+                .execute()
+            )
+
+            return {
+                "ok": True,
+                "event": "state_response",
+                "client_id": client_id,
+                "request_id": datos.get("request_id"),
+                "updated": result.data,
+            }
+
+        # Mensajes normales de Home Assistant
         update_data = {
             "online": True,
             "mqtt_clientid": mqtt_clientid,
             "mqtt_reason": None,
         }
 
-        if "pertiga" in topic:
+        state = normalize_on_off(
+            datos.get("state") or datos.get("estado")
+        )
+
+        if "pertiga" in topic and state:
             update_data["pertiga"] = {
-                "estado": datos["state"],
+                "estado": state,
                 "id": topic,
             }
 
-        if "tablero" in topic:
+        if "enchufe" in topic and state:
+            update_data["enchufe"] = {
+                "estado": state,
+                "id": topic,
+            }
+
+        if "luz" in topic and state:
+            update_data["luz"] = {
+                "estado": state,
+                "id": topic,
+            }
+
+        if "tablero" in topic and "contact" in datos:
             update_data["sensor_apertura"] = {
-                "estado": "Cerrado" if datos["contact"] else "Abierto",
+                "estado": (
+                    "Cerrado"
+                    if datos["contact"]
+                    else "Abierto"
+                ),
                 "battery": datos.get("battery"),
             }
 
-        if "domotica" in topic:
+        if "domotica" in topic and "contact" in datos:
             update_data["domotica"] = {
-                "estado": "Cerrado" if datos["contact"] else "Abierto",
+                "estado": (
+                    "Cerrado"
+                    if datos["contact"]
+                    else "Abierto"
+                ),
                 "battery": datos.get("battery"),
             }
 
         if "illuminance" in datos:
             update_data["sensor_luz"] = {
-                "iluminancia": datos["illuminance"]
+                "iluminancia": datos["illuminance"],
             }
-        
+
         if "temperature" in datos:
             update_data["temperature"] = {
-                "temperature": datos["temperature"]
+                "temperature": datos["temperature"],
             }
+
         if "humidity" in datos:
             update_data["humidity"] = {
-                "humidity": datos["humidity"]
+                "humidity": datos["humidity"],
             }
 
-        if "luz" in topic:
-            update_data["luz"] = {
-                "estado": datos["state"],
-                "id": topic,
-            }
-
-        supabase.table("tower_value") \
-            .update(update_data) \
-            .eq("client_id", topic_id) \
+        result = (
+            supabase.table("tower_value")
+            .update(update_data)
+            .eq("client_id", topic_id)
             .execute()
+        )
 
         return {
             "ok": True,
@@ -494,23 +679,42 @@ async def emqx_webhook(req: Request):
             "topic_id": topic_id,
             "clientid": mqtt_clientid,
             "online": True,
+            "updated": result.data,
         }
 
-    except Exception as e:
-        print(f"Error EMQX webhook: {e}")
+    except json.JSONDecodeError as error:
+        print(f"Payload JSON inválido: {error}")
+
         return {
             "ok": False,
-            "error": str(e),
+            "error": "Payload JSON inválido",
+        }
+
+    except Exception as error:
+        print(f"Error EMQX webhook: {error}")
+
+        return {
+            "ok": False,
+            "error": str(error),
         }
 
 @app.post("/emqx-client-disconnected")
-async def emqx_client_status(req: Request):
+async def emqx_client_status(
+    req: Request,
+    background_tasks: BackgroundTasks,
+):
     try:
         data = await req.json()
         print("EMQX CLIENT STATUS:", data)
 
-        mqtt_clientid = data.get("clientid")
-        event = data.get("event")
+        mqtt_clientid = str(
+            data.get("clientid") or ""
+        ).strip()
+
+        event = str(
+            data.get("event") or ""
+        ).strip()
+
         reason = data.get("reason")
 
         if not mqtt_clientid:
@@ -544,6 +748,31 @@ async def emqx_client_status(req: Request):
             .execute()
         )
 
+        requested_clients = []
+
+        if event == "client.connected":
+            towers_result = (
+                supabase.table("tower_value")
+                .select("client_id")
+                .eq("mqtt_clientid", mqtt_clientid)
+                .execute()
+            )
+
+            client_ids = {
+                str(row.get("client_id") or "").strip("/")
+                for row in (towers_result.data or [])
+                if row.get("client_id")
+            }
+
+            for client_id in client_ids:
+                background_tasks.add_task(
+                    request_ha_states_after_connect,
+                    client_id,
+                    mqtt_clientid,
+                )
+
+                requested_clients.append(client_id)
+
         return {
             "ok": True,
             "event": event,
@@ -551,14 +780,15 @@ async def emqx_client_status(req: Request):
             "online": online,
             "reason": mqtt_reason,
             "updated": result.data,
+            "state_requests": requested_clients,
         }
 
-    except Exception as e:
-        print(f"Error EMQX client status: {e}")
+    except Exception as error:
+        print(f"Error EMQX client status: {error}")
 
         return {
             "ok": False,
-            "error": str(e),
+            "error": str(error),
         }
 # ================== INVERTER (SOLISCLOUD) ==================
 
