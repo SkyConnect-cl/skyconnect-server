@@ -879,39 +879,96 @@ IOT_URL = os.getenv("IOT_URL")
 IOT_USER = os.getenv("IOT_USER")
 IOT_PASS = os.getenv("IOT_PASS")
 
+
+def build_set_topic(topic: str) -> str:
+    """
+    Garantiza que el topic termine con un único /set.
+
+    Ejemplos:
+    homeassistant-3/pertiga
+        -> homeassistant-3/pertiga/set
+
+    homeassistant-3/pertiga/set
+        -> homeassistant-3/pertiga/set
+
+    homeassistant-3/pertiga/set/set/set
+        -> homeassistant-3/pertiga/set
+    """
+    normalized_topic = str(topic or "").strip().strip("/")
+
+    parts = [
+        part.strip()
+        for part in normalized_topic.split("/")
+        if part.strip()
+    ]
+
+    # Elimina todos los segmentos "set" que estén al final.
+    while parts and parts[-1].lower() == "set":
+        parts.pop()
+
+    if not parts:
+        raise ValueError("Topic inválido")
+
+    return "/".join(parts) + "/set"
+
+
 @app.post("/handle-light")
 async def handle_light(request: Request):
     try:
         data = await request.json()
-        print(data)
-    except Exception:
-        raise HTTPException(status_code=400, detail="JSON inválido")
+        print("HANDLE LIGHT:", data)
 
-    state = data.get("state", "").upper()
-    topic = data.get("topic", "")
+    except Exception:
+        raise HTTPException(
+            status_code=400,
+            detail="JSON inválido"
+        )
+
+    state = str(data.get("state") or "").strip().upper()
+    topic = str(data.get("topic") or "").strip()
 
     if not topic:
-        raise HTTPException(status_code=400, detail="Topic requerido")
+        raise HTTPException(
+            status_code=400,
+            detail="Topic requerido"
+        )
 
-    if state not in ["ON", "OFF"]:
-        raise HTTPException(status_code=400, detail="Estado inválido")
+    if state not in {"ON", "OFF"}:
+        raise HTTPException(
+            status_code=400,
+            detail="Estado inválido"
+        )
+
+    try:
+        publish_topic = build_set_topic(topic)
+
+    except ValueError as error:
+        raise HTTPException(
+            status_code=400,
+            detail=str(error)
+        )
 
     payload = {
         "payload_encoding": "plain",
-        "topic": f"{topic}/set",
-        "payload": f'{{"state": "{state}"}}'
+        "topic": publish_topic,
+        "payload": json.dumps({
+            "state": state
+        }),
+        "qos": 1,
+        "retain": False,
     }
 
     try:
-        res = requests.post(
+        # Se ejecuta fuera del event loop porque requests es síncrono.
+        res = await asyncio.to_thread(
+            requests.post,
             IOT_URL,
             json=payload,
             auth=(IOT_USER, IOT_PASS),
             headers={"Content-Type": "application/json"},
-            timeout=5
+            timeout=5,
         )
 
-        # ❗ Si el broker responde mal
         if res.status_code >= 400:
             raise HTTPException(
                 status_code=502,
@@ -921,14 +978,22 @@ async def handle_light(request: Request):
         return {
             "ok": True,
             "state": state,
-            "broker_status": res.status_code
+            "topic_received": topic,
+            "topic_published": publish_topic,
+            "broker_status": res.status_code,
         }
 
     except requests.exceptions.Timeout:
-        raise HTTPException(status_code=504, detail="Timeout al conectar con IoT")
+        raise HTTPException(
+            status_code=504,
+            detail="Timeout al conectar con IoT"
+        )
 
-    except requests.exceptions.RequestException as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    except requests.exceptions.RequestException as error:
+        raise HTTPException(
+            status_code=500,
+            detail=str(error)
+        )
 
 
 # ================== GPS ==================
