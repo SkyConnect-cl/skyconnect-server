@@ -516,6 +516,12 @@ async def emqx_webhook(req: Request):
             }
 
         topic_id = topic.split("/")[0]
+
+        # Elimina /set únicamente para guardar el ID en Supabase.
+        # Ejemplo:
+        # homeassistant-3/pertiga/set -> homeassistant-3/pertiga
+        topic_sin_set = topic.removesuffix("/set")
+
         raw_payload = data.get("payload")
 
         if raw_payload in (None, ""):
@@ -529,6 +535,7 @@ async def emqx_webhook(req: Request):
         datos = parse_mqtt_payload(raw_payload)
 
         print("topic:", topic)
+        print("topic_sin_set:", topic_sin_set)
         print("topic_id:", topic_id)
         print("mqtt_clientid:", mqtt_clientid)
         print("datos:", datos)
@@ -542,7 +549,8 @@ async def emqx_webhook(req: Request):
                 "topic": topic,
             }
 
-        # Respuesta de Node-RED con los estados actuales de Home Assistant.
+        # Respuesta de Node-RED con los estados actuales
+        # de Home Assistant.
         if topic.endswith("/state/response"):
             client_id = str(
                 datos.get("client_id") or topic_id
@@ -569,7 +577,6 @@ async def emqx_webhook(req: Request):
                     state = normalize_on_off(
                         value.get("estado") or value.get("state")
                     )
-
                 else:
                     state = normalize_on_off(value)
 
@@ -579,6 +586,8 @@ async def emqx_webhook(req: Request):
                         "id": f"{client_id}/{field}",
                     }
 
+            # Si solamente están los tres datos generales,
+            # significa que no llegaron estados válidos.
             if len(update_data) == 3:
                 return {
                     "ok": False,
@@ -601,7 +610,7 @@ async def emqx_webhook(req: Request):
                 "updated": result.data,
             }
 
-        # Mensajes normales de Home Assistant
+        # Mensajes normales de Home Assistant.
         update_data = {
             "online": True,
             "mqtt_clientid": mqtt_clientid,
@@ -615,19 +624,19 @@ async def emqx_webhook(req: Request):
         if "pertiga" in topic and state:
             update_data["pertiga"] = {
                 "estado": state,
-                "id": topic,
+                "id": topic_sin_set,
             }
 
         if "enchufe" in topic and state:
             update_data["enchufe"] = {
                 "estado": state,
-                "id": topic,
+                "id": topic_sin_set,
             }
 
         if "luz" in topic and state:
             update_data["luz"] = {
                 "estado": state,
-                "id": topic,
+                "id": topic_sin_set,
             }
 
         if "tablero" in topic and "contact" in datos:
@@ -676,6 +685,7 @@ async def emqx_webhook(req: Request):
             "ok": True,
             "event": "message",
             "topic": topic,
+            "topic_saved": topic_sin_set,
             "topic_id": topic_id,
             "clientid": mqtt_clientid,
             "online": True,
