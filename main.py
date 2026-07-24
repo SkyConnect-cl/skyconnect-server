@@ -500,12 +500,35 @@ async def request_ha_states_after_connect(
             f"Error solicitando estados de {client_id}: {error}"
         )
 
+def clean_device_topic(topic: str) -> str:
+    """
+    Elimina cualquier cantidad de segmentos /set al final.
+
+    Ejemplos:
+    homeassistant-3/pertiga/set -> homeassistant-3/pertiga
+    homeassistant-3/pertiga/set/set/set -> homeassistant-3/pertiga
+    torre-001/luz -> torre-001/luz
+    """
+    normalized_topic = normalize_emqx_topic(topic)
+
+    parts = [
+        part.strip()
+        for part in normalized_topic.split("/")
+        if part.strip()
+    ]
+
+    while parts and parts[-1].lower() == "set":
+        parts.pop()
+
+    return "/".join(parts)
+
 @app.post("/emqx-webhook")
 async def emqx_webhook(req: Request):
     try:
         data = await req.json()
         print("EMQX WEBHOOK:", data)
 
+        # Topic exactamente como llega desde EMQX.
         topic = normalize_emqx_topic(data.get("topic"))
         mqtt_clientid = data.get("clientid")
 
@@ -515,12 +538,19 @@ async def emqx_webhook(req: Request):
                 "error": "No viene topic",
             }
 
-        topic_id = topic.split("/")[0]
+        # Topic limpio para guardar en Supabase.
+        # Elimina todos los /set finales.
+        topic_sin_set = clean_device_topic(topic)
 
-        # Elimina /set únicamente para guardar el ID en Supabase.
-        # Ejemplo:
-        # homeassistant-3/pertiga/set -> homeassistant-3/pertiga
-        topic_sin_set = topic.removesuffix("/set")
+        if not topic_sin_set:
+            return {
+                "ok": False,
+                "error": "Topic inválido después de normalizar",
+                "topic": topic,
+            }
+
+        topic_parts = topic_sin_set.split("/")
+        topic_id = topic_parts[0]
 
         raw_payload = data.get("payload")
 
@@ -534,8 +564,8 @@ async def emqx_webhook(req: Request):
 
         datos = parse_mqtt_payload(raw_payload)
 
-        print("topic:", topic)
-        print("topic_sin_set:", topic_sin_set)
+        print("topic recibido:", topic)
+        print("topic limpio:", topic_sin_set)
         print("topic_id:", topic_id)
         print("mqtt_clientid:", mqtt_clientid)
         print("datos:", datos)
@@ -549,12 +579,12 @@ async def emqx_webhook(req: Request):
                 "topic": topic,
             }
 
-        # Respuesta de Node-RED con los estados actuales
-        # de Home Assistant.
+        # Respuesta de Node-RED con los estados reales
+        # existentes en Home Assistant.
         if topic.endswith("/state/response"):
             client_id = str(
                 datos.get("client_id") or topic_id
-            ).strip()
+            ).strip().strip("/")
 
             states = datos.get("states")
 
@@ -586,8 +616,8 @@ async def emqx_webhook(req: Request):
                         "id": f"{client_id}/{field}",
                     }
 
-            # Si solamente están los tres datos generales,
-            # significa que no llegaron estados válidos.
+            # online, mqtt_clientid y mqtt_reason son las
+            # tres propiedades iniciales.
             if len(update_data) == 3:
                 return {
                     "ok": False,
@@ -610,7 +640,7 @@ async def emqx_webhook(req: Request):
                 "updated": result.data,
             }
 
-        # Mensajes normales de Home Assistant.
+        # Mensajes normales y comandos recibidos por EMQX.
         update_data = {
             "online": True,
             "mqtt_clientid": mqtt_clientid,
@@ -621,25 +651,29 @@ async def emqx_webhook(req: Request):
             datos.get("state") or datos.get("estado")
         )
 
-        if "pertiga" in topic and state:
+        # Usamos segmentos exactos para evitar coincidencias
+        # accidentales dentro de otros nombres.
+        topic_segments = set(topic_parts)
+
+        if "pertiga" in topic_segments and state:
             update_data["pertiga"] = {
                 "estado": state,
                 "id": topic_sin_set,
             }
 
-        if "enchufe" in topic and state:
+        if "enchufe" in topic_segments and state:
             update_data["enchufe"] = {
                 "estado": state,
                 "id": topic_sin_set,
             }
 
-        if "luz" in topic and state:
+        if "luz" in topic_segments and state:
             update_data["luz"] = {
                 "estado": state,
                 "id": topic_sin_set,
             }
 
-        if "tablero" in topic and "contact" in datos:
+        if "tablero" in topic_segments and "contact" in datos:
             update_data["sensor_apertura"] = {
                 "estado": (
                     "Cerrado"
@@ -649,7 +683,7 @@ async def emqx_webhook(req: Request):
                 "battery": datos.get("battery"),
             }
 
-        if "domotica" in topic and "contact" in datos:
+        if "domotica" in topic_segments and "contact" in datos:
             update_data["domotica"] = {
                 "estado": (
                     "Cerrado"
@@ -684,7 +718,7 @@ async def emqx_webhook(req: Request):
         return {
             "ok": True,
             "event": "message",
-            "topic": topic,
+            "topic_received": topic,
             "topic_saved": topic_sin_set,
             "topic_id": topic_id,
             "clientid": mqtt_clientid,
