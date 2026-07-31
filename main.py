@@ -530,6 +530,9 @@ async def emqx_webhook(req: Request):
 
         # Topic exactamente como llega desde EMQX.
         topic = normalize_emqx_topic(data.get("topic"))
+
+        # Se mantiene únicamente para logs y respuestas.
+        # No se guarda en tower_value.
         mqtt_clientid = data.get("clientid")
 
         if not topic:
@@ -538,8 +541,7 @@ async def emqx_webhook(req: Request):
                 "error": "No viene topic",
             }
 
-        # Topic limpio para guardar en Supabase.
-        # Elimina todos los /set finales.
+        # Elimina todos los segmentos /set finales.
         topic_sin_set = clean_device_topic(topic)
 
         if not topic_sin_set:
@@ -570,7 +572,7 @@ async def emqx_webhook(req: Request):
         print("mqtt_clientid:", mqtt_clientid)
         print("datos:", datos)
 
-        # El backend publica esta solicitud.
+        # Solicitud publicada por el backend.
         # No debe modificar la base de datos.
         if topic.endswith("/state/request"):
             return {
@@ -596,7 +598,6 @@ async def emqx_webhook(req: Request):
 
             update_data = {
                 "online": True,
-                "mqtt_clientid": mqtt_clientid,
                 "mqtt_reason": None,
             }
 
@@ -616,9 +617,8 @@ async def emqx_webhook(req: Request):
                         "id": f"{client_id}/{field}",
                     }
 
-            # online, mqtt_clientid y mqtt_reason son las
-            # tres propiedades iniciales.
-            if len(update_data) == 3:
+            # online y mqtt_reason son las dos propiedades iniciales.
+            if len(update_data) == 2:
                 return {
                     "ok": False,
                     "error": "La respuesta no contiene estados válidos",
@@ -643,7 +643,6 @@ async def emqx_webhook(req: Request):
         # Mensajes normales y comandos recibidos por EMQX.
         update_data = {
             "online": True,
-            "mqtt_clientid": mqtt_clientid,
             "mqtt_reason": None,
         }
 
@@ -651,8 +650,7 @@ async def emqx_webhook(req: Request):
             datos.get("state") or datos.get("estado")
         )
 
-        # Usamos segmentos exactos para evitar coincidencias
-        # accidentales dentro de otros nombres.
+        # Segmentos exactos para evitar coincidencias accidentales.
         topic_segments = set(topic_parts)
 
         if "pertiga" in topic_segments and state:
@@ -741,7 +739,7 @@ async def emqx_webhook(req: Request):
             "ok": False,
             "error": str(error),
         }
-
+    
 @app.post("/emqx-client-disconnected")
 async def emqx_client_status(
     req: Request,
