@@ -1270,3 +1270,61 @@ async def recibir_nmea(request: Request):
         })
         supabase.table("device_position").insert(registro).execute()
     return {"status": "ok"}
+
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+import secrets
+from typing import Literal
+from fastapi import Depends, FastAPI, HTTPException
+from pydantic import BaseModel, ConfigDict, Field
+
+security = HTTPBearer(auto_error=False)
+
+DEVICES = {
+    os.environ["DEVICE_ID_HASH"]: {
+        "nombre": os.environ["DEVICE_NAME"],
+        "token_hash": os.environ["DEVICE_TOKEN_HASH"],
+    }
+}
+
+class CompassMessage(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    device_id: str = Field(pattern=r"^[0-9a-f]{64}$")
+    direccion: Literal["NORTE", "SUR", "ESTE", "OESTE"]
+
+
+@app.post("/brujula")
+def recibir_brujula(
+    mensaje: CompassMessage,
+    credenciales: HTTPAuthorizationCredentials | None = Depends(security),
+):
+    equipo = DEVICES.get(mensaje.device_id)
+
+    if (
+        credenciales is None
+        or credenciales.scheme.lower() != "bearer"
+        or equipo is None
+    ):
+        raise HTTPException(
+            status_code=401,
+            detail="Equipo o clave no autorizados",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    hash_recibido = hashlib.sha256(
+        credenciales.credentials.encode("utf-8")
+    ).hexdigest()
+
+    if not secrets.compare_digest(hash_recibido, equipo["token_hash"]):
+        raise HTTPException(
+            status_code=401,
+            detail="Equipo o clave no autorizados",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    print(
+        f"Equipo: {equipo['nombre']} "
+        f"| ID: {mensaje.device_id} "
+        f"| Dirección: {mensaje.direccion}",
+        flush=True,
+    )
