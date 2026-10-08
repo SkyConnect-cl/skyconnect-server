@@ -1276,15 +1276,26 @@ import secrets
 from typing import Literal
 from fastapi import Depends, FastAPI, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
+import threading
+from collections import OrderedDict
+from time import monotonic
+import logging
+
+logger = logging.getLogger("uvicorn.error")
+
 
 security = HTTPBearer(auto_error=False)
 
-DEVICES = {
-    os.environ["DEVICE_ID_HASH"]: {
-        "nombre": os.environ["DEVICE_NAME"],
-        "token_hash": os.environ["DEVICE_TOKEN_HASH"],
-    }
-}
+# Tiempo máximo durante el que se reutiliza un registro.
+CACHE_TTL_SECONDS = 60
+
+# Evita que la caché crezca sin límite.
+CACHE_MAX_EQUIPOS = 1000
+
+# Guarda: device_id -> (fecha de vencimiento, datos del equipo).
+equipos_cache = OrderedDict()
+cache_lock = threading.Lock()
+
 
 class CompassMessage(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -1293,38 +1304,154 @@ class CompassMessage(BaseModel):
     direccion: Literal["NORTE", "SUR", "ESTE", "OESTE"]
 
 
+def rechazar_equipo():
+    raise HTTPException(
+        status_code=401,
+        detail="Equipo o clave no autorizados",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+
+
+def obtener_equipo(device_id: str):
+    ahora = monotonic()
+
+    # 1. Intentar obtener el equipo desde la memoria.
+    with cache_lock:
+        entrada = equipos_cache.get(device_id)
+
+        if entrada is not None:
+            vence_en, equipo = entrada
+
+            if ahora < vence_en:
+                equipos_cache.move_to_end(device_id)
+                return equipo
+
+            del equipos_cache[device_id]
+
+    # 2. Si no está o venció, consultar Supabase.
+    try:
+        resultado = (
+            supabase
+            .table("brujula_equipos")
+            .select("device_id,nombre,token_hash,torre_id,activo")
+            .eq("device_id", device_id)
+            .limit(1)
+            .execute()
+        )
+
+    except Exception as error:
+        logger.error(
+            "Error consultando brújula: %s",
+            type(error).__name__,
+        )
+
+        raise HTTPException(
+            status_code=503,
+            detail="No se pudo verificar el equipo. Reintenta.",
+        ) from error
+
+    equipo = resultado.data[0] if resultado.data else None
+
+    # No guardar IDs desconocidos.
+    if equipo is None:
+        return None
+
+    # 3. Guardar el registro durante 60 segundos.
+    with cache_lock:
+        equipos_cache[device_id] = (
+            monotonic() + CACHE_TTL_SECONDS,
+            equipo,
+        )
+
+        equipos_cache.move_to_end(device_id)
+
+        while len(equipos_cache) > CACHE_MAX_EQUIPOS:
+            equipos_cache.popitem(last=False)
+
+    return equipo
+
+
 @app.post("/brujula")
 def recibir_brujula(
     mensaje: CompassMessage,
     credenciales: HTTPAuthorizationCredentials | None = Depends(security),
 ):
-    equipo = DEVICES.get(mensaje.device_id)
-
+    # 1. Exigir una clave.
     if (
         credenciales is None
         or credenciales.scheme.lower() != "bearer"
-        or equipo is None
+        or not credenciales.credentials
+        or len(credenciales.credentials) > 256
     ):
-        raise HTTPException(
-            status_code=401,
-            detail="Equipo o clave no autorizados",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
+        rechazar_equipo()
 
+    # 2. Obtener el registro desde memoria o Supabase.
+    equipo = obtener_equipo(mensaje.device_id)
+
+    if equipo is None or not equipo["activo"]:
+        rechazar_equipo()
+
+    # 3. Validar la clave en CADA mensaje, incluso usando caché.
     hash_recibido = hashlib.sha256(
         credenciales.credentials.encode("utf-8")
     ).hexdigest()
 
-    if not secrets.compare_digest(hash_recibido, equipo["token_hash"]):
+    if not secrets.compare_digest(
+        hash_recibido,
+        equipo["token_hash"],
+    ):
+        rechazar_equipo()
+
+    # La torre se obtiene del registro autorizado.
+    torre_id = equipo["torre_id"]
+    fecha = datetime.now(timezone.utc).isoformat()
+
+    # 4. Actualizar directamente la torre asociada.
+    try:
+        resultado = (
+            supabase
+            .table("tower_value")
+            .update({
+                "orientacion": mensaje.direccion,
+                "orientacion_actualizada_en": fecha,
+            })
+            .eq("id", torre_id)
+            .select("id")
+            .execute()
+        )
+
+    except Exception as error:
+        logger.error(
+            "Error guardando orientación: equipo=%s, tipo=%s",
+            mensaje.device_id,
+            type(error).__name__,
+        )
+
         raise HTTPException(
-            status_code=401,
-            detail="Equipo o clave no autorizados",
-            headers={"WWW-Authenticate": "Bearer"},
+            status_code=503,
+            detail="No se pudo guardar la orientación. Reintenta.",
+        ) from error
+
+    if not resultado.data:
+        # Obligar a consultar otra vez su asociación.
+        with cache_lock:
+            equipos_cache.pop(mensaje.device_id, None)
+
+        raise HTTPException(
+            status_code=409,
+            detail="La torre asociada no está disponible.",
         )
 
     print(
-        f"Equipo: {equipo['nombre']} "
-        f"| ID: {mensaje.device_id} "
-        f"| Dirección: {mensaje.direccion}",
+        f"Brújula: {equipo['nombre']} "
+        f"| Torre: {torre_id} "
+        f"| Orientación: {mensaje.direccion}",
         flush=True,
     )
+
+    # Solo confirma después de guardar en Supabase.
+    return {
+        "ok": True,
+        "torre_id": torre_id,
+        "direccion": mensaje.direccion,
+    }
