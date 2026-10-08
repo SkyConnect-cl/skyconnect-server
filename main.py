@@ -1409,17 +1409,15 @@ def recibir_brujula(
     # 4. Actualizar directamente la torre asociada.
     try:
         resultado = (
-            supabase
-            .table("tower_value")
-            .update({
-                "orientacion": mensaje.direccion,
-                "orientacion_actualizada_en": fecha,
-            })
-            .eq("id", torre_id)
-            .select("id")
-            .execute()
-        )
-
+    supabase
+    .table("tower_value")
+    .update({
+        "orientacion": mensaje.direccion,
+        "orientacion_actualizada_en": fecha,
+    })
+    .eq("id", torre_id)
+    .execute()
+)
     except Exception as error:
         logger.error(
             "Error guardando orientación: equipo=%s, tipo=%s",
